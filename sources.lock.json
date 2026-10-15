@@ -1,0 +1,49 @@
+{
+  "zandronum": {
+    "url": "https://github.com/TorrSamaho/zandronum.git",
+    "commit": "28f736fb3f77bf0b767ec5468191bc05d0fccbb9",
+    "timestamp": 1754343618
+  },
+  "reference_zdoom3ds": {
+    "url": "https://github.com/ronokopl/ultimate-doom-launcher-3ds.git",
+    "commit": "9c4614f3edfa6b4e848f90cd3e4ce576f29a8215",
+    "usage": "OS adapters, generated XLAT parser, ARM config headers and RSF mappings. The game engine remains Zandronum. Native NDSP/CSND backend and decoder adapters adapted to Zandronum audio ABI."
+  },
+  "mbedtls": {
+    "version": "3.6.7",
+    "url": "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2",
+    "sha256": "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6",
+    "usage": "TLS 1.2 server browser, verified ISRG Root X1, PS hardware RNG, no TLS work during gameplay"
+  },
+  "makerom": {
+    "version": "0.18.3",
+    "url": "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.3/makerom-v0.18.3-win_x86_64.zip",
+    "sha256": "18cf7fb59db40e0919c1f3330762b26fd1fc78faeec61703fdd0121f1119dc6c"
+  },
+  "reference_prboom3ds": {
+    "url": "https://github.com/Voxel9/PrBoom-Plus-3DS.git",
+    "commit": "f2ecd89f753bc111dfd236075d9e9fcc77cc7149",
+    "usage": "Reference for native HID/IRRST polling, continuous stick input and touchscreen mouse behavior; no engine substitution."
+  },
+  "tremor": {
+    "url": "https://gitlab.xiph.org/xiph/tremor.git",
+    "commit": "820fb3237ea81af44c9cc468c8b4e20128e3e5ad"
+  },
+  "libogg": {
+    "url": "https://github.com/xiph/ogg.git",
+    "commit": "06a5e0262cdc28aa4ae6797627a783b5010440f0",
+    "configuration": "ARM32 config_types.h uses signed int for Tremor exponent pointer compatibility."
+  },
+  "dr_libs": {
+    "url": "https://github.com/mackron/dr_libs",
+    "files": {
+      "dr_mp3.h": "997b7ee18de6e6b81e2a83f1ea9fc62aef25c62b28d48db95635f49e65de0a2f",
+      "dr_flac.h": "111144e778f55738db6851cb226015c419e00d04b916a09506d4856d9cff945c"
+    }
+  },
+  "dsp_firmware_extractor": {
+    "dsp1": "https://github.com/zoogie/DSP1",
+    "ctrtool_license_commit": "52dbe5e187a2d5b1ea2fbf6537db7cc058d09f66",
+    "usage": "Read-only extraction from the running console; no Nintendo firmware in the distribution."
+  }
+}

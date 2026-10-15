@@ -1,0 +1,2047 @@
+diff --git a/GeoIP/GeoIP.c b/GeoIP/GeoIP.c
+index 12b900339..508d510ed 100644
+--- a/GeoIP/GeoIP.c
++++ b/GeoIP/GeoIP.c
+@@ -1143,6 +1143,10 @@ unsigned long _GeoIP_lookupaddress (const char *host) {
+ geoipv6_t 
+ _GeoIP_lookupaddress_v6(const char *host)
+ {
++#ifdef __3DS__
++  (void)host;
++  return IPV6_NULL;
++#else
+   geoipv6_t       ipnum;
+   int             gaierr;
+   struct addrinfo hints, *aifirst;
+@@ -1161,6 +1165,7 @@ _GeoIP_lookupaddress_v6(const char *host)
+   /* inet_pton(AF_INET6, host, ipnum.s6_addr); */
+   
+   return ipnum;
++#endif
+ }
+ 
+ int GeoIP_id_by_name (GeoIP* gi, const char *name) {
+diff --git a/GeoIP/GeoIP.h b/GeoIP/GeoIP.h
+index 3733f3459..36733857e 100644
+--- a/GeoIP/GeoIP.h
++++ b/GeoIP/GeoIP.h
+@@ -33,6 +33,11 @@ extern "C" {
+ #include <sys/socket.h>
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
++#ifdef __3DS__
++// libctru exposes IPv6 family constants but not an IPv6 address storage type.
++// GeoIP needs only this 16-byte representation for its database parser.
++struct in6_addr { unsigned char s6_addr[16]; };
++#endif
+ #else /* !defined(_WIN32) */ 
+ #include <winsock2.h> 
+ #include <ws2tcpip.h> 
+diff --git a/dumb/src/it/itrender.c b/dumb/src/it/itrender.c
+index ba31a87f0..2e4712ec7 100644
+--- a/dumb/src/it/itrender.c
++++ b/dumb/src/it/itrender.c
+@@ -63,8 +63,19 @@ static IT_PLAYING *new_playing(DUMB_IT_SIGRENDERER *itsr)
+ 	return r;
+ }
+ 
++static void free_playing_orig(IT_PLAYING *r);
++
+ static void free_playing(DUMB_IT_SIGRENDERER *itsr, IT_PLAYING *playing)
+ {
++#ifdef __3DS__
++	/* XM instrument events clone playings even without starting a new note.
++	 * Those clones enter this pool faster than new_playing() consumes them.
++	 * Keep a bounded idle cache; active voices and their audio remain intact. */
++	IT_PLAYING *cached = itsr->free_playing;
++	int idle = 0;
++	while (cached && idle < 32) { cached = cached->next; ++idle; }
++	if (idle >= 32) { free_playing_orig(playing); return; }
++#endif
+ 	playing->next = itsr->free_playing;
+ 	itsr->free_playing = playing;
+ }
+diff --git a/src/basictypes.h b/src/basictypes.h
+index 860d69ee4..d42ca2adf 100644
+--- a/src/basictypes.h
++++ b/src/basictypes.h
+@@ -17,8 +17,15 @@ typedef int8_t					SBYTE;
+ typedef uint8_t					BYTE;
+ typedef int16_t					SWORD;
+ typedef uint16_t				WORD;
++#ifdef __3DS__
++// newlib's int32_t is long; ACS and serialization also require int identity.
++typedef int                         SDWORD;
++typedef unsigned int                uint32;
++static_assert(sizeof(int) == 4, "Zandronum requires 32-bit int");
++#else
+ typedef int32_t					SDWORD;
+ typedef uint32_t				uint32;
++#endif
+ typedef int64_t					SQWORD;
+ typedef uint64_t				QWORD;
+ #endif
+diff --git a/src/cl_main.cpp b/src/cl_main.cpp
+index d9c4ad8ef..031593f87 100644
+--- a/src/cl_main.cpp
++++ b/src/cl_main.cpp
+@@ -484,6 +484,10 @@ static void client_ResetValuesOnConnection( void )
+ //
+ void CLIENT_Construct( void )
+ {
++#ifdef __3DS__
++    extern bool I3DS_NetworkEnabled();
++    if (!I3DS_NetworkEnabled()) return;
++#endif
+ 	const char	*pszPort;
+ 	const char	*pszIPAddress;
+ 	const char	*pszDemoName;
+@@ -9601,6 +9605,13 @@ void STACK_ARGS CLIENT_PrintWarning( const char* format, ... )
+ 
+ CCMD( connect )
+ {
++#ifdef __3DS__
++    extern bool I3DS_NetworkEnabled();
++    if (!I3DS_NetworkEnabled()) {
++        Printf("Select Network mode in the 3DS launcher first.\n");
++        return;
++    }
++#endif
+ 	const char	*pszDemoName;
+ 
+ 	// [AK] This function may not be used by ConsoleCommand.
+diff --git a/src/cmdlib.cpp b/src/cmdlib.cpp
+index a912e9552..82e991a2b 100644
+--- a/src/cmdlib.cpp
++++ b/src/cmdlib.cpp
+@@ -7,7 +7,7 @@
+ #include <unistd.h>
+ #include <sys/types.h>
+ #include <pwd.h>
+-#if !defined(__sun)
++#if !defined(__sun) && !defined(__3DS__)
+ #include <fts.h>
+ #endif
+ #endif
+@@ -980,7 +980,7 @@ void ScanDirectory(TArray<FFileList> &list, const char *dirpath)
+ 	}
+ }
+ 
+-#elif defined(__sun) || defined(__linux__)
++#elif defined(__sun) || defined(__linux__) || defined(__3DS__)
+ 
+ //==========================================================================
+ //
+diff --git a/src/d_main.cpp b/src/d_main.cpp
+index b0009d291..fb30936b5 100644
+--- a/src/d_main.cpp
++++ b/src/d_main.cpp
+@@ -1017,7 +1017,16 @@ drawfullconsole:
+ 				// [BB] This check shouldn't be necessary, but should completely prevent
+ 				// the "tried to render NULL actor" errors.
+ 				if ( (players[consoleplayer].mo != NULL) && (players[consoleplayer].camera != NULL) )
++				{
++					#ifdef __3DS__
++					unsigned viewStart=I_MSTime();
++					#endif
+ 					Renderer->RenderView(&players[consoleplayer]);
++					#ifdef __3DS__
++					extern void I3DS_RecordCost(unsigned,unsigned);
++					I3DS_RecordCost(2,I_MSTime()-viewStart);
++					#endif
++				}
+ 				// [BB] Zandronum handles prediction differently.
+ 				//P_UnPredictPlayer();
+ 			}
+@@ -1281,6 +1290,11 @@ void D_DoomLoop ()
+ 	{
+ 		try
+ 		{
++			#ifdef __3DS__
++			extern void I3DS_BeginFrame();
++			extern void I3DS_BeginDraw();
++			I3DS_BeginFrame();
++			#endif
+ 			switch ( NETWORK_GetState( ))
+ 			{
+ 			case NETSTATE_CLIENT:
+@@ -1314,6 +1328,9 @@ void D_DoomLoop ()
+ 				if ( cl_useskulltagmouse == false )
+ 					I_StartTic( );
+ 
++				#ifdef __3DS__
++				I3DS_BeginDraw();
++				#endif
+ 				D_Display( );
+ 				break;
+ 			case NETSTATE_SERVER:
+@@ -1354,9 +1371,18 @@ void D_DoomLoop ()
+ 				}
+ 				// Update display, next frame, with current state.
+ 				I_StartTic ();
++				#ifdef __3DS__
++				I3DS_BeginDraw();
++				#endif
+ 				D_Display ();
+ 				break;
+ 			}
++			#ifdef __3DS__
++			if (NETWORK_GetState() != NETSTATE_SERVER) {
++				extern void I3DS_CollectAfterFrame();
++				I3DS_CollectAfterFrame();
++			}
++			#endif
+ 		}
+ 		catch (CRecoverableError &error)
+ 		{
+@@ -1559,6 +1585,9 @@ void D_DoStrifeAdvanceDemo ()
+ //
+ //==========================================================================
+ 
++#ifdef __3DS__
++CVAR(Bool, native_titlemap_3ds, true, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
++#endif
+ void D_DoAdvanceDemo (void)
+ {
+ 	static char demoname[8] = "DEMO1";
+@@ -1581,7 +1610,11 @@ void D_DoAdvanceDemo (void)
+ 	// [RH] If you want something more dynamic for your title, create a map
+ 	// and name it TITLEMAP. That map will be loaded and used as the title.
+ 
+-	if (P_CheckMapData("TITLEMAP"))
++	if (
++	#ifdef __3DS__
++		native_titlemap_3ds &&
++	#endif
++		P_CheckMapData("TITLEMAP"))
+ 	{
+ 		G_InitNew ("TITLEMAP", true);
+ 		return;
+@@ -1631,6 +1664,9 @@ void D_DoAdvanceDemo (void)
+ 		gamestate = GS_DEMOSCREEN;
+ 		pagename = gameinfo.titlePage;
+ 		pagetic = (int)(gameinfo.titleTime * TICRATE);
++		#ifdef __3DS__
++		if (!native_titlemap_3ds) pagetic=INT_MAX; // Wait for the user, not a demo map.
++		#endif
+ 		S_ChangeMusic (gameinfo.titleMusic, gameinfo.titleOrder, false);
+ 		demosequence = 3;
+ 		pagecount = 0;
+@@ -3322,6 +3358,10 @@ void D_DoomMain (void)
+ 			GC::FullGC();					// perform one final garbage collection before deleting the class data
+ 			PClass::ClearRuntimeData();		// clear all runtime generated class data
+ 			restart++;
++#ifdef __3DS__
++			extern void I3DS_RestartLauncher();
++			I3DS_RestartLauncher();
++#endif
+ 		}
+ 	}
+ 	while (1);
+diff --git a/src/g_game.cpp b/src/g_game.cpp
+index d4e850fc6..140baad32 100644
+--- a/src/g_game.cpp
++++ b/src/g_game.cpp
+@@ -1322,6 +1322,9 @@ CVAR( Int, joinmenukey, JOINMENUKEY_Space, CVAR_ARCHIVE );
+ 
+ int G_GetJoinMenuKey()
+ {
++#ifdef __3DS__
++	return KEY_PAD_A;
++#else
+ 	switch ( joinmenukey )
+ 	{
+ 	default:
+@@ -1331,15 +1334,20 @@ int G_GetJoinMenuKey()
+ 	case JOINMENUKEY_Enter:
+ 		return KEY_ENTER;
+ 	}
++#endif
+ }
+ 
+ const char* G_DescribeJoinMenuKey()
+ {
++#ifdef __3DS__
++	return "A";
++#else
+ 	const char* names[] = { "Space", "Enter" };
+ 	if ( static_cast<unsigned>( joinmenukey ) < countof( names ))
+ 		return names[joinmenukey];
+ 	else
+ 		return names[0];
++#endif
+ }
+ 
+ //
+@@ -1397,6 +1405,9 @@ bool G_Responder (event_t *ev)
+ 		// [BB] This "eats" the key, therefore we must return true here.
+ 		if ( ( ev->type == EV_KeyDown ) && ( ev->data1 == G_GetJoinMenuKey() ) && players[consoleplayer].bSpectating )
+ 		{
++#ifdef __3DS__
++			if (Args->CheckParm("-3ds-test-join")) Printf("3DS JOIN TEST: A accepted while spectating\n");
++#endif
+ 			C_DoCommand( "menu_join" );
+ 			return true;
+ 		}
+diff --git a/src/g_shared/st_hud.cpp b/src/g_shared/st_hud.cpp
+index b3d29040d..38d1c9e13 100644
+--- a/src/g_shared/st_hud.cpp
++++ b/src/g_shared/st_hud.cpp
+@@ -901,7 +901,9 @@ static void HUD_DrawBottomString( ULONG ulDisplayPlayer )
+ 		{
+ 			int key1 = 0, key2 = 0;
+ 
++#ifndef __3DS__
+ 			Bindings.GetKeysForCommand( "menu_join", &key1, &key2 );
++#endif
+ 			bottomString += "Spectating - press '";
+ 
+ 			if ( key2 )
+diff --git a/src/m_alloc.cpp b/src/m_alloc.cpp
+index 3b601d716..0e6c7d386 100644
+--- a/src/m_alloc.cpp
++++ b/src/m_alloc.cpp
+@@ -63,6 +63,9 @@
+ void *M_Malloc(size_t size)
+ {
+ 	void *block = malloc(size);
++#ifdef __3DS__
++	if (!block) { extern unsigned Z3DS_PurgeResourceCache(); Z3DS_PurgeResourceCache(); block=malloc(size); }
++#endif
+ 
+ 	if (block == NULL)
+ 		I_FatalError("Could not malloc %zu bytes", size);
+@@ -78,6 +81,9 @@ void *M_Realloc(void *memblock, size_t size)
+ 		GC::AllocBytes -= _msize(memblock);
+ 	}
+ 	void *block = realloc(memblock, size);
++#ifdef __3DS__
++	if (!block) { extern unsigned Z3DS_PurgeResourceCache(); Z3DS_PurgeResourceCache(); block=realloc(memblock,size); }
++#endif
+ 	if (block == NULL)
+ 	{
+ 		I_FatalError("Could not realloc %zu bytes", size);
+diff --git a/src/m_argv.cpp b/src/m_argv.cpp
+index ac5e2b799..e8f8a5673 100644
+--- a/src/m_argv.cpp
++++ b/src/m_argv.cpp
+@@ -242,13 +242,11 @@ void DArgs::RemoveArgs(const char *check)
+ {
+ 	int i = CheckParm(check);
+ 
+-	if (i > 0 && i < (int)Argv.Size() - 1)
++	if (i > 0)
+ 	{
+-		do 
+-		{
++		RemoveArg(i);
++		while (i < (int)Argv.Size() && Argv[i][0] != '+' && Argv[i][0] != '-')
+ 			RemoveArg(i);
+-		}
+-		while (Argv[i][0] != '+' && Argv[i][0] != '-' && i < (int)Argv.Size() - 1);
+ 	}
+ }
+ 
+diff --git a/src/md5.cpp b/src/md5.cpp
+index 4ee4abc3f..d6f560912 100644
+--- a/src/md5.cpp
++++ b/src/md5.cpp
+@@ -272,7 +272,12 @@ bool MD5SumOfFile ( const char *Filename, char *MD5Sum )
+ 	else
+ 	{
+ 		MD5Context md5;
++#ifdef __3DS__
++		// Batch SD reads; avoid thousands of filesystem IPC requests per PK3.
++		BYTE readbuf[65536];
++#else
+ 		BYTE readbuf[8192];
++#endif
+ 		size_t len;
+ 
+ 		while ((len = fread(readbuf, 1, sizeof(readbuf), file)) > 0)
+diff --git a/src/network.cpp b/src/network.cpp
+index 059214fa0..0efe9e314 100644
+--- a/src/network.cpp
++++ b/src/network.cpp
+@@ -49,9 +49,15 @@
+ //-----------------------------------------------------------------------------
+ 
+ #include "networkheaders.h"
++#ifdef __3DS__
++extern "C" {
++#include <3ds/types.h>
++#include <3ds/services/soc.h>
++}
++#endif
+ 
+ // [BB] Special things necessary for NETWORK_GetLocalAddress() under Linux.
+-#ifdef __unix__
++#if defined(__unix__) && !defined(__3DS__)
+ #include <net/if.h>
+ #define inaddrr(x) (*(struct in_addr *) &ifr->x[sizeof sa.sin_port])
+ #define IFRSIZE   ((int)(size * sizeof (struct ifreq)))
+@@ -171,6 +177,9 @@ static TArray<LONG> g_LumpNumsToAuthenticate ( 0 );
+ 
+ // The current network state. Single player, client, server, etc.
+ static	LONG			g_lNetworkState = NETSTATE_SINGLE;
++#ifdef __3DS__
++static bool g_3DSDeferredPWADHashes;
++#endif
+ 
+ // Buffer that holds the data from the most recently received packet.
+ static	NETBUFFER_s		g_NetworkMessage;
+@@ -179,10 +188,10 @@ static	NETBUFFER_s		g_NetworkMessage;
+ static	NETADDRESS_s	g_AddressFrom;
+ 
+ // Our network socket.
+-static	SOCKET			g_NetworkSocket;
++static	SOCKET			g_NetworkSocket = INVALID_SOCKET;
+ 
+ // Socket for listening for LAN games.
+-static	SOCKET			g_LANSocket;
++static	SOCKET			g_LANSocket = INVALID_SOCKET;
+ // [BB] Did binding the LAN socket fail?
+ static	bool				g_bLANSocketInvalid = false;
+ 
+@@ -257,6 +266,10 @@ static	void			network_ParseLumpAuthenticationMode( FScanner &sc, LumpAuthenticat
+ 
+ void NETWORK_Construct( USHORT usPort, bool bAllocateLANSocket )
+ {
++#ifdef __3DS__
++    extern bool I3DS_NetworkEnabled();
++    if (!I3DS_NetworkEnabled()) return;
++#endif
+ 	char			szString[128];
+ 	ULONG			ulArg;
+ 	USHORT			usNewPort;
+@@ -265,7 +278,11 @@ void NETWORK_Construct( USHORT usPort, bool bAllocateLANSocket )
+ 	// Initialize the Huffman buffer.
+ 	HUFFMAN_Construct( );
+ 
+-	if ( !restart )
++	if ( !restart
++#ifdef __3DS__
++        || g_NetworkSocket == INVALID_SOCKET
++#endif
++    )
+ 	{
+ #ifdef __WIN32__
+ 		// [BB] Linux doesn't know WSADATA, so this may not be moved outside the ifdef.
+@@ -732,6 +749,14 @@ void NETWORK_Construct( USHORT usPort, bool bAllocateLANSocket )
+ //
+ void NETWORK_Destruct( void )
+ {
++#ifdef __3DS__
++    // A launcher return shuts SOC down. Recreate sockets on the next game.
++    {
++        if (g_NetworkSocket != INVALID_SOCKET) close(g_NetworkSocket);
++        if (g_LANSocket != INVALID_SOCKET) close(g_LANSocket);
++        g_NetworkSocket = g_LANSocket = INVALID_SOCKET;
++    }
++#endif
+ 	// Free the network message buffer.
+ 	g_NetworkMessage.Free();
+ 
+@@ -749,7 +774,7 @@ int NETWORK_GetPackets( void )
+ {
+ 	LONG				lNumBytes;
+ 	INT					iDecodedNumBytes = sizeof(g_ucHuffmanBuffer);
+-	sockaddr			SocketFrom;
++	sockaddr_in		SocketFrom;
+ 	INT					iSocketFromLength;
+ 
+ 	iSocketFromLength = sizeof( SocketFrom );
+@@ -759,9 +784,9 @@ int NETWORK_GetPackets( void )
+ 		return ( 0 );
+ 
+ #ifdef	WIN32
+-	lNumBytes = recvfrom( g_NetworkSocket, (char *)g_ucHuffmanBuffer, sizeof( g_ucHuffmanBuffer ), 0, &SocketFrom, &iSocketFromLength );
++	lNumBytes = recvfrom( g_NetworkSocket, (char *)g_ucHuffmanBuffer, sizeof( g_ucHuffmanBuffer ), 0, reinterpret_cast<sockaddr *>(&SocketFrom), &iSocketFromLength );
+ #else
+-	lNumBytes = recvfrom( g_NetworkSocket, (char *)g_ucHuffmanBuffer, sizeof( g_ucHuffmanBuffer ), 0, &SocketFrom, (socklen_t *)&iSocketFromLength );
++	lNumBytes = recvfrom( g_NetworkSocket, (char *)g_ucHuffmanBuffer, sizeof( g_ucHuffmanBuffer ), 0, reinterpret_cast<sockaddr *>(&SocketFrom), (socklen_t *)&iSocketFromLength );
+ #endif
+ 
+ 	// If the number of bytes returned is -1, an error has occured.
+@@ -810,7 +835,7 @@ int NETWORK_GetPackets( void )
+ 		return ( 0 );
+ 
+ 	// Store the IP address of the sender.
+-	g_AddressFrom.LoadFromSocketAddress( SocketFrom );
++	g_AddressFrom.LoadFromSocketAddress( reinterpret_cast<sockaddr &>(SocketFrom) );
+ 
+ 	// Decode the huffman-encoded message we received.
+ 	// [BB] Communication with the auth server is not Huffman-encoded.
+@@ -830,6 +855,12 @@ int NETWORK_GetPackets( void )
+ 	g_NetworkMessage.ByteStream.pbStreamEnd = g_NetworkMessage.ByteStream.pbStream + g_NetworkMessage.ulCurrentSize;
+ 	g_NetworkMessage.ByteStream.bitBuffer = NULL;
+ 	g_NetworkMessage.ByteStream.bitShift = -1;
++#ifdef __3DS__
++    if(Args->CheckParm("-3ds-test-network")) {
++        static unsigned received;
++        if(received++<8) Printf("3DS UDP TEST: from=%s wire=%ld decoded=%u first=%u\n",g_AddressFrom.ToString(),lNumBytes,(unsigned)g_NetworkMessage.ulCurrentSize,(unsigned)g_NetworkMessage.pbData[0]);
++    }
++#endif
+ 
+ 	return ( g_NetworkMessage.ulCurrentSize );
+ }
+@@ -839,20 +870,21 @@ int NETWORK_GetPackets( void )
+ int NETWORK_GetLANPackets( void )
+ {
+ 	// [BB] If we know that there is a problem with the socket don't try to use it.
+-	if ( g_bLANSocketInvalid )
++	if ( g_bLANSocketInvalid || g_LANSocket == INVALID_SOCKET )
+ 		return 0;
+ 
+ 	LONG				lNumBytes;
+ 	INT					iDecodedNumBytes = sizeof(g_ucHuffmanBuffer);
+-	sockaddr			SocketFrom;
++	// libctru sockaddr has a flexible array (sizeof=2); reserve the IPv4 address.
++	sockaddr_in		SocketFrom;
+ 	INT					iSocketFromLength;
+ 
+     iSocketFromLength = sizeof( SocketFrom );
+ 
+ #ifdef	WIN32
+-	lNumBytes = recvfrom( g_LANSocket, (char *)g_ucHuffmanBuffer, sizeof( g_ucHuffmanBuffer ), 0, &SocketFrom, &iSocketFromLength );
++	lNumBytes = recvfrom( g_LANSocket, (char *)g_ucHuffmanBuffer, sizeof( g_ucHuffmanBuffer ), 0, reinterpret_cast<sockaddr *>(&SocketFrom), &iSocketFromLength );
+ #else
+-	lNumBytes = recvfrom( g_LANSocket, (char *)g_ucHuffmanBuffer, sizeof( g_ucHuffmanBuffer ), 0, &SocketFrom, (socklen_t *)&iSocketFromLength );
++	lNumBytes = recvfrom( g_LANSocket, (char *)g_ucHuffmanBuffer, sizeof( g_ucHuffmanBuffer ), 0, reinterpret_cast<sockaddr *>(&SocketFrom), (socklen_t *)&iSocketFromLength );
+ #endif
+ 
+ 	// If the number of bytes returned is -1, an error has occured.
+@@ -901,7 +933,7 @@ int NETWORK_GetLANPackets( void )
+ 		return ( 0 );
+ 
+ 	// Store the IP address of the sender.
+-	g_AddressFrom.LoadFromSocketAddress( SocketFrom );
++	g_AddressFrom.LoadFromSocketAddress( reinterpret_cast<sockaddr &>(SocketFrom) );
+ 
+ 	// Decode the huffman-encoded message we received.
+ 	// [BB] Communication with the auth server is not Huffman-encoded.
+@@ -934,6 +966,7 @@ NETADDRESS_s NETWORK_GetFromAddress( void )
+ //
+ void NETWORK_LaunchPacket( NETBUFFER_s *pBuffer, NETADDRESS_s Address )
+ {
++    if (g_NetworkSocket == INVALID_SOCKET) return;
+ 	LONG				lNumBytes;
+ 	INT					iNumBytesOut = sizeof(g_ucHuffmanBuffer);
+ 
+@@ -1015,6 +1048,14 @@ return;
+ //
+ NETADDRESS_s NETWORK_GetLocalAddress( void )
+ {
++#ifdef __3DS__
++    NETADDRESS_s Address;
++    extern bool I3DS_NetworkEnabled();
++    if (!I3DS_NetworkEnabled()) return Address;
++    unsigned long host = gethostid();
++    memcpy(Address.abIP, &host, 4);
++    return Address;
++#else
+ 	char				szBuffer[512];
+ 	struct sockaddr_in	SocketAddress;
+ 	int					iNameLength;
+@@ -1137,6 +1178,7 @@ NETADDRESS_s NETWORK_GetLocalAddress( void )
+ 
+ 	Address.usPort = SocketAddress.sin_port;
+ 	return ( Address );
++#endif
+ }
+ 
+ //*****************************************************************************
+@@ -1732,6 +1774,14 @@ void NETWORK_SetState( LONG lState )
+ 		D_SetupUserInfo();
+ 
+ 	g_lNetworkState = lState;
++#ifdef __3DS__
++	if (g_3DSDeferredPWADHashes && (lState == NETSTATE_CLIENT || lState == NETSTATE_SERVER))
++	{
++		g_3DSDeferredPWADHashes = false;
++		Printf("3DS: preparing original archive hashes for multiplayer.\n");
++		network_InitPWADList();
++	}
++#endif
+ 
+ 	// [BB] Limit certain CVARs like turbo on clients. Needs to be done here in addition
+ 	// to where the CVAR is implemented, because the check over there is not
+@@ -1758,6 +1808,9 @@ void NETWORK_SetState( LONG lState )
+ static void network_InitPWADList( void )
+ {
+ 	g_PWADs.Clear();
++#ifdef __3DS__
++	g_AuthenticatedWADs.Clear();
++#endif
+ 
+ 	// Find the IWAD index.
+ 	ULONG ulNumPWADs = 0, ulRealIWADIdx = 0;
+@@ -1789,8 +1842,13 @@ static void network_InitPWADList( void )
+ 		const bool bIsIwad = ( ulIdx == ulRealIWADIdx );
+ 		const bool bIsBaseWad = ( stricmp( Wads.GetWadName( ulIdx ), BASEWAD ) == 0 ); // [SB] Corrected to use BASEWAD instead of GAMENAMELOWERCASE ".pk3"
+ 
+-		char MD5Sum[33];
+-		MD5SumOfFile ( Wads.GetWadFullName( ulIdx ), MD5Sum );
++		char MD5Sum[33] = {};
++#ifdef __3DS__
++		if (g_lNetworkState == NETSTATE_SINGLE || g_lNetworkState == NETSTATE_SINGLE_MULTIPLAYER)
++			g_3DSDeferredPWADHashes = true;
++		else
++#endif
++			MD5SumOfFile ( Wads.GetWadFullName( ulIdx ), MD5Sum );
+ 
+ 		NetworkPWAD pwad;
+ 		pwad.name = Wads.GetWadName( ulIdx );
+diff --git a/src/networkshared.cpp b/src/networkshared.cpp
+index 959948d2e..e79e58318 100644
+--- a/src/networkshared.cpp
++++ b/src/networkshared.cpp
+@@ -634,6 +634,10 @@ bool NETADDRESS_s::LoadFromString ( const char* string )
+ 		// If our return value is INADDR_NONE, the IP specified is not a valid IPv4 string.
+ 		if ( ulRet == INADDR_NONE )
+ 		{
++#ifdef __3DS__
++            extern bool I3DS_NetworkEnabled();
++            if (!I3DS_NetworkEnabled()) return false;
++#endif
+ 			// If the string cannot be resolved to a valid IP address, return false.
+ 			if (( h = gethostbyname( copy )) == NULL )
+ 				return false;
+@@ -661,7 +665,8 @@ void NETADDRESS_s::LoadFromSocketAddress ( const struct sockaddr& sockaddr )
+ //
+ void NETADDRESS_s::ToSocketAddress( struct sockaddr &SocketAddress ) const
+ {
+-	memset( &SocketAddress, 0, sizeof SocketAddress );
++	// Callers supply sockaddr_in; libctru's generic sockaddr is only 2 bytes.
++	memset( &SocketAddress, 0, sizeof(sockaddr_in) );
+ 
+ 	struct sockaddr_in *ipv4 = reinterpret_cast <struct sockaddr_in *> ( &SocketAddress );
+ 	*(int *)&ipv4->sin_addr = *(int *)&abIP;
+diff --git a/src/p_acs.cpp b/src/p_acs.cpp
+index 39f56be63..ee545247a 100644
+--- a/src/p_acs.cpp
++++ b/src/p_acs.cpp
+@@ -357,7 +357,8 @@ BoundsCheckingArray<FWorldGlobalArray, NUM_GLOBALVARS> ACS_GlobalArrays;
+ //
+ //----------------------------------------------------------------------------
+ 
+-using FACSStackMemory = BoundsCheckingArray<int32_t, STACK_SIZE>;
++// Keep the VM stack type identical to the engine's ACS string pool API on ARM.
++using FACSStackMemory = BoundsCheckingArray<SDWORD, STACK_SIZE>;
+ 
+ struct FACSStack
+ {
+@@ -2314,6 +2315,14 @@ static int ParseLocalArrayChunk(void *chunk, ACSLocalArrays *arrays, int offset)
+ 	return offset;
+ }
+ 
++// Import records contain variable-length names, so the following words need
++// not be aligned. ARM LDM faults even where a single unaligned LDR is allowed.
++static DWORD ReadACSImportWord(const void *address)
++{
++	const volatile BYTE *p = (const volatile BYTE *)address;
++	return DWORD(p[0]) | (DWORD(p[1]) << 8) | (DWORD(p[2]) << 16) | (DWORD(p[3]) << 24);
++}
++
+ FBehavior::FBehavior (int lumpnum, FileReader * fr, int len)
+ {
+ 	BYTE *object;
+@@ -2737,7 +2746,7 @@ FBehavior::FBehavior (int lumpnum, FileReader * fr, int len)
+ 					char *parse = (char *)&chunk[2];
+ 					for (DWORD j = 0; j < chunk[1]; )
+ 					{
+-						DWORD varNum = LittleLong(*(DWORD *)&parse[j]);
++						DWORD varNum = ReadACSImportWord(&parse[j]);
+ 						j += 4;
+ 						int impNum = lib->FindMapVarName (&parse[j]);
+ 						if (impNum >= 0)
+@@ -2756,9 +2765,9 @@ FBehavior::FBehavior (int lumpnum, FileReader * fr, int len)
+ 					char *parse = (char *)&chunk[3];
+ 					for (DWORD j = 0; j < LittleLong(chunk[2]); ++j)
+ 					{
+-						DWORD varNum = LittleLong(*(DWORD *)parse);
++						DWORD varNum = ReadACSImportWord(parse);
+ 						parse += 4;
+-						DWORD expectedSize = LittleLong(*(DWORD *)parse);
++						DWORD expectedSize = ReadACSImportWord(parse);
+ 						parse += 4;
+ 						int impNum = lib->FindMapArray (parse);
+ 						if (impNum >= 0)
+diff --git a/src/p_setup.cpp b/src/p_setup.cpp
+index 61abc17f5..41cbaf29c 100644
+--- a/src/p_setup.cpp
++++ b/src/p_setup.cpp
+@@ -90,6 +90,9 @@
+ 
+ // [BB] New #includes..
+ #include "gl/dynlights/gl_dynlight.h"
++#ifdef __3DS__
++#include <malloc.h>
++#endif
+ 
+ #define MISSING_TEXTURE_WARN_LIMIT		20
+ 
+@@ -4002,7 +4005,19 @@ void P_SetupLevel (char *lumpname, int position)
+ 	C_MidPrint (NULL, NULL);
+ 
+ 	// Free all level data from the previous map
++#ifdef __3DS__
++    int previousHeap=mallinfo().uordblks/1024;
++#endif
+ 	P_FreeLevelData ();
++#ifdef __3DS__
++    // Reclaim the previous title/map before allocating the next map. Pixel
++    // data is reloadable from the SD resource caches; map actors are not.
++    TexMan.UnloadAll();
++    extern unsigned Z3DS_PurgeResourceCache();
++    unsigned released = Z3DS_PurgeResourceCache();
++    GC::FullGC();
++    Printf("3DS map transition: heap %d -> %d KiB, %u KiB resource cache purged\n", previousHeap,mallinfo().uordblks/1024,released/1024);
++#endif
+ 	interpolator.ClearInterpolations();	// [RH] Nothing to interpolate on a fresh level.
+ 
+ 	MapData *map = P_OpenMapData(lumpname, true);
+diff --git a/src/r_data/colormaps.cpp b/src/r_data/colormaps.cpp
+index 3fbb0c124..df1c63147 100644
+--- a/src/r_data/colormaps.cpp
++++ b/src/r_data/colormaps.cpp
+@@ -444,6 +444,14 @@ void R_SetDefaultColormap (const char *name)
+ 			}
+ 		}
+ 
++#ifdef __3DS__
++        // Doom's original COLORMAP has no entries for added native mod colors.
++        // Preserve its original indexed-color lighting and fill only new slots.
++        if(!strnicmp(name,"COLORMAP",8)) {
++            extern void Z3DS_ExtendDefaultColormap(BYTE *);
++            Z3DS_ExtendDefaultColormap(realcolormaps);
++        }
++#endif
+ 		uppercopy (fakecmaps[0].name, name);
+ 		fakecmaps[0].blend = 0;
+ 	}
+@@ -669,4 +677,4 @@ DWORD R_BlendForColormap (DWORD map)
+ {
+ 	return APART(map) ? map : 
+ 		map < fakecmaps.Size() ? DWORD(fakecmaps[map].blend) : 0;
+-}
+\ No newline at end of file
++}
+diff --git a/src/r_draw.cpp b/src/r_draw.cpp
+index 1c889e966..4e9544488 100644
+--- a/src/r_draw.cpp
++++ b/src/r_draw.cpp
+@@ -195,6 +195,7 @@ void R_DrawColumnP_C (void)
+ 	if (count <= 0)
+ 		return;
+ 
++
+ 	// Framebuffer destination address.
+ 	dest = dc_dest;
+ 
+diff --git a/src/r_swrenderer.cpp b/src/r_swrenderer.cpp
+index 9c67c77eb..6d7377c2b 100644
+--- a/src/r_swrenderer.cpp
++++ b/src/r_swrenderer.cpp
+@@ -96,11 +96,17 @@ void FSoftwareRenderer::PrecacheTexture(FTexture *tex, int cache)
+ 	{
+ 		if (cache & 1)
+ 		{
++#ifdef __3DS__
++            return; // Decode only the sprite frame actually used on screen.
++#endif
+ 			const FTexture::Span *spanp;
+ 			tex->GetColumn(0, &spanp);
+ 		}
+ 		else if (cache != 0)
+ 		{
++#ifdef __3DS__
++            return; // SD cache supplies pixels on demand; avoid map-wide RAM spikes.
++#endif
+ 			tex->GetPixels ();
+ 		}
+ 		else
+diff --git a/src/r_things.cpp b/src/r_things.cpp
+index 758549c15..ed9da9485 100644
+--- a/src/r_things.cpp
++++ b/src/r_things.cpp
+@@ -337,6 +337,7 @@ void R_DrawVisSprite (vissprite_t *vis)
+ 
+ 	mode = R_SetPatchStyle (vis->Style.RenderStyle, vis->Style.alpha, vis->Translation, vis->FillColor);
+ 
++
+ 	if (vis->Style.RenderStyle == LegacyRenderStyles[STYLE_Shaded])
+ 	{ // For shaded sprites, R_SetPatchStyle sets a dc_colormap to an alpha table, but
+ 	  // it is the brightest one. We need to get back to the proper light level for
+diff --git a/src/resourcefiles/file_directory.cpp b/src/resourcefiles/file_directory.cpp
+index 4d20728a1..ef94ddb62 100644
+--- a/src/resourcefiles/file_directory.cpp
++++ b/src/resourcefiles/file_directory.cpp
+@@ -41,7 +41,7 @@
+ #define stat _stat
+ #else
+ #include <dirent.h>
+-#ifndef __sun
++#if !defined(__sun) && !defined(__3DS__)
+ #include <fts.h>
+ #endif
+ #endif
+@@ -198,7 +198,7 @@ int FDirectory::AddDirectory(const char *dirpath)
+ 	return count;
+ }
+ 
+-#elif defined(__sun) || defined(__APPLE__)
++#elif defined(__sun) || defined(__APPLE__) || defined(__3DS__)
+ 
+ int FDirectory::AddDirectory(const char *dirpath)
+ {
+diff --git a/src/resourcefiles/file_wad.cpp b/src/resourcefiles/file_wad.cpp
+index 25989d760..674f8008a 100644
+--- a/src/resourcefiles/file_wad.cpp
++++ b/src/resourcefiles/file_wad.cpp
+@@ -239,6 +239,9 @@ public:
+ 	int GetFileOffset() { return Position; }
+ 	FileReader *GetReader()
+ 	{
++#ifdef __3DS__
++		if (ResourceCacheOffset >= 0) return NULL;
++#endif
+ 		if(!Compressed)
+ 		{
+ 			Owner->Reader->Seek(Position, SEEK_SET);
+@@ -363,8 +366,14 @@ bool FWadFile::Open(bool quiet)
+ 		Lumps[i].Namespace = ns_global;
+ 		Lumps[i].Flags = 0;
+ 		Lumps[i].FullName = NULL;
++#ifdef __3DS__
++		Lumps[i].ResourceCacheKey = i;
++#endif
+ 	}
+ 
++#ifdef __3DS__
++	if (!isBigEndian) Z3DS_LoadResourceCache(this, (const BYTE *)fileinfo, NumLumps * sizeof(wadlump_t), 2);
++#endif
+ 	delete[] fileinfo;
+ 
+ 	if (!quiet)
+diff --git a/src/resourcefiles/file_zip.cpp b/src/resourcefiles/file_zip.cpp
+index a4f14d2a5..aefe6d230 100644
+--- a/src/resourcefiles/file_zip.cpp
++++ b/src/resourcefiles/file_zip.cpp
+@@ -40,7 +40,13 @@
+ #include "w_wad.h"
+ #include "w_zip.h"
+ #include "i_system.h"
++#ifdef __3DS__
++#include "md5.h"
++#include <algorithm>
++#endif
+ #include "ancientzip.h"
++#include <set>
++#include <string>
+ 
+ #define BUFREADCOMMENT (0x400)
+ 
+@@ -114,6 +120,15 @@ struct FZipLump : public FResourceLump
+ 	BYTE	Method;
+ 	int		CompressedSize;
+ 	int		Position;
++#ifdef __3DS__
++	const char *TextureHeader = NULL;
++	int TextureHeaderSize = 0;
++	DWORD EntryCRC;
++	FileReader *OpenTextureHeader()
++	{
++		return TextureHeader ? new MemoryReader(TextureHeader, TextureHeaderSize) : NULL;
++	}
++#endif
+ 
+ 	virtual FileReader *GetReader();
+ 	virtual int FillCache();
+@@ -137,6 +152,10 @@ private:
+ class FZipFile : public FResourceFile
+ {
+ 	FZipLump *Lumps;
++#ifdef __3DS__
++	TArray<BYTE> TextureHeaderCache;
++	void LoadTextureHeaders(const BYTE *directory, unsigned size);
++#endif
+ 
+ 	static int STACK_ARGS lumpcmp(const void * a, const void * b);
+ 
+@@ -144,8 +163,23 @@ public:
+ 	FZipFile(const char * filename, FileReader *file);
+ 	virtual ~FZipFile();
+ 	bool Open(bool quiet);
++	void ReleaseTextureHeaders();
+ 	virtual FResourceLump *GetLump(int no) { return ((unsigned)no < NumLumps)? &Lumps[no] : NULL; }
+ };
++#ifdef __3DS__
++static TArray<FZipFile *> &textureHeaderOwners = *new TArray<FZipFile *>;
++void Z3DS_ReleaseTextureHeaders()
++{
++	for (unsigned i=0; i<textureHeaderOwners.Size(); ++i) textureHeaderOwners[i]->ReleaseTextureHeaders();
++}
++void FZipFile::ReleaseTextureHeaders()
++{
++	for (unsigned i=0; i<NumLumps; ++i) { Lumps[i].TextureHeader=NULL; Lumps[i].TextureHeaderSize=0; }
++	TextureHeaderCache.Clear(); TextureHeaderCache.ShrinkToFit();
++}
++#else
++void FZipFile::ReleaseTextureHeaders() {}
++#endif
+ 
+ 
+ 
+@@ -168,6 +202,9 @@ FZipFile::FZipFile(const char * filename, FileReader *file)
+ : FResourceFile(filename, file)
+ {
+ 	Lumps = NULL;
++#ifdef __3DS__
++	textureHeaderOwners.Push(this);
++#endif
+ }
+ 
+ bool FZipFile::Open(bool quiet)
+@@ -206,7 +243,7 @@ bool FZipFile::Open(bool quiet)
+ 	Reader->Read(directory, dirsize);
+ 
+ 	// [AK] Store the names of all the lumps in the current directory.
+-	TArray<FString> oldNames;
++	std::set<std::string> oldNames;
+ 	FString currentDirectory;
+ 
+ 	char *dirptr = (char*)directory;
+@@ -270,6 +307,10 @@ bool FZipFile::Open(bool quiet)
+ 		lump_p->GPFlags = zip_fh->Flags;
+ 		lump_p->CompressedSize = LittleLong(zip_fh->CompressedSize);
+ 		lump_p->Position = LittleLong(zip_fh->LocalHeaderOffset);
++#ifdef __3DS__
++		lump_p->ResourceCacheKey = lump_p->Position;
++		lump_p->EntryCRC = LittleLong(zip_fh->CRC32);
++#endif
+ 		lump_p->CheckEmbedded();
+ 
+ 		// Ignore some very specific names
+@@ -290,14 +331,13 @@ bool FZipFile::Open(bool quiet)
+ 		// [AK] Check if we're in the same directory. If not, clear the list of old lump names.
+ 		if ((currentDirectory.IsEmpty()) || (currentDirectory.CompareNoCase(directoryName) != 0))
+ 		{
+-			oldNames.Clear();
++			oldNames.clear();
+ 			currentDirectory = directoryName;
+ 		}
+ 
+ 		// [AK] Check for any duplicate lumps in the current directory.
+-		for (int i = oldNames.Size() - 1; i > -1; i--)
+ 		{
+-			if (oldNames[i].CompareNoCase(name) == 0)
++			if (oldNames.find(name.GetChars()) != oldNames.end())
+ 			{
+ 				const char *shortenedFilename = strrchr(Filename, '/');
+ 				if (shortenedFilename != NULL) shortenedFilename++;
+@@ -322,16 +362,19 @@ bool FZipFile::Open(bool quiet)
+ 					DuplicateLumpFilenames.Push(actualFilename);
+ 				}
+ 
+-				break;
+ 			}
+ 		}
+ 
+ 		// [AK] Add this lump name to the list.
+-		oldNames.Push(name);
++		oldNames.insert(name.GetChars());
+ 		lump_p++;
+ 	}
+ 	// Resize the lump record array to its actual size
+ 	NumLumps -= skipped;
++#ifdef __3DS__
++	LoadTextureHeaders((const BYTE *)directory, dirsize);
++	Z3DS_LoadResourceCache(this, (const BYTE *)directory, dirsize, 1);
++#endif
+ 	free(directory);
+ 
+ 	if (!quiet) Printf(TEXTCOLOR_NORMAL ", %d lumps\n", NumLumps);
+@@ -341,6 +384,56 @@ bool FZipFile::Open(bool quiet)
+ 	return true;
+ }
+ 
++#ifdef __3DS__
++void FZipFile::LoadTextureHeaders(const BYTE *directory, unsigned size)
++{
++	FString path(Filename); path += ".3ds-cache";
++	FileReader cache;
++	if (!cache.Open(path)) return;
++	long length = cache.GetLength();
++	// Limit auxiliary heap usage and reject malformed/truncated cache files.
++	if (length < 48 || length > 16 * 1024 * 1024) return;
++	TextureHeaderCache.Resize(length);
++	if (cache.Read(&TextureHeaderCache[0], length) != length) { TextureHeaderCache.Clear(); return; }
++	const BYTE *base = &TextureHeaderCache[0], *end = base + length;
++	BYTE digest[16]; MD5Context md5; md5.Update(directory, size); md5.Final(digest);
++	DWORD sourceSize, count;
++	memcpy(&sourceSize, base + 24, 4); memcpy(&count, base + 28, 4);
++	if (memcmp(base, "Z3DTH003", 8) || memcmp(base + 8, digest, 16) ||
++		LittleLong(sourceSize) != (DWORD)Reader->GetLength() || LittleLong(count) > NumLumps)
++	{ TextureHeaderCache.Clear(); Printf("3DS texture cache ignored (archive changed): %s\n", Filename); return; }
++	md5.Init(); md5.Update(base + 48, length - 48); md5.Final(digest);
++	if (memcmp(base + 32, digest, 16) || !NumLumps) { TextureHeaderCache.Clear(); return; }
++	TArray<FZipLump *> ordered;
++	for (unsigned i = 0; i < NumLumps; ++i) ordered.Push(&Lumps[i]);
++	std::sort(&ordered[0], &ordered[0] + ordered.Size(), [](FZipLump *a, FZipLump *b) { return a->Position < b->Position; });
++	const BYTE *record = base + 48; unsigned index = 0, matched = 0;
++	DWORD previous = 0;
++	for (unsigned n = 0; n < LittleLong(count); ++n)
++	{
++		if (end - record < 20) goto invalid;
++		DWORD fields[5]; memcpy(fields, record, 20); record += 20;
++		for (int f = 0; f < 5; ++f) fields[f] = LittleLong(fields[f]);
++		if ((n && fields[0] <= previous) || fields[4] < 41 || fields[4] > 65536 || (unsigned)(end - record) < fields[4]) goto invalid;
++		previous = fields[0];
++		while (index < ordered.Size() && (DWORD)ordered[index]->Position < fields[0]) ++index;
++		if (index >= ordered.Size()) goto invalid;
++		FZipLump *lump = ordered[index];
++		if ((DWORD)lump->Position != fields[0] || (DWORD)lump->LumpSize != fields[1] ||
++			(DWORD)lump->CompressedSize != fields[2] || lump->EntryCRC != fields[3] ||
++			memcmp(record, "\x89PNG\r\n\x1a\n", 8)) goto invalid;
++		lump->TextureHeader = (const char *)record; lump->TextureHeaderSize = fields[4]; ++matched;
++		record += fields[4];
++	}
++	if (record != end) goto invalid;
++	Printf("3DS texture cache: %u PNG headers, %lu KiB (%s)\n", matched, (unsigned long)length/1024, Filename);
++	return;
++invalid:
++	for (unsigned i = 0; i < NumLumps; ++i) { Lumps[i].TextureHeader = NULL; Lumps[i].TextureHeaderSize = 0; }
++	TextureHeaderCache.Clear(); Printf("3DS texture cache ignored (invalid data): %s\n", Filename);
++}
++#endif
++
+ //==========================================================================
+ //
+ // Zip file
+@@ -349,6 +442,10 @@ bool FZipFile::Open(bool quiet)
+ 
+ FZipFile::~FZipFile()
+ {
++#ifdef __3DS__
++	for (unsigned i=0; i<textureHeaderOwners.Size(); ++i)
++		if (textureHeaderOwners[i]==this) { textureHeaderOwners.Delete(i); break; }
++#endif
+ 	if (Lumps != NULL) delete [] Lumps;
+ }
+ 
+@@ -383,6 +480,9 @@ void FZipLump::SetLumpAddress()
+ 
+ FileReader *FZipLump::GetReader()
+ {
++#ifdef __3DS__
++	if (ResourceCacheOffset >= 0) return NULL;
++#endif
+ 	// Don't return the reader if this lump is encrypted
+ 	// In that case always force caching of the lump
+ 	if (Method == METHOD_STORED)
+@@ -425,6 +525,22 @@ int FZipLump::FillCache()
+ 
+ 		case METHOD_DEFLATE:
+ 		{
++#ifdef __3DS__
++			// Small PNG/script entries are common in BYOC. Read exactly one
++			// compressed entry instead of repeatedly fetching 4 KiB chunks
++			// (including bytes from the following entry) through SD IPC.
++			if (CompressedSize > 0 && CompressedSize <= 65536)
++			{
++				TArray<char> compressed;
++				compressed.Resize(CompressedSize);
++				if (Owner->Reader->Read(&compressed[0], CompressedSize) != CompressedSize)
++					I_Error("Truncated ZIP entry: %s", FullName);
++				MemoryReader input(&compressed[0], CompressedSize);
++				FileReaderZ frz(input, true);
++				frz.Read(Cache, LumpSize);
++				break;
++			}
++#endif
+ 			FileReaderZ frz(*Owner->Reader, true);
+ 			frz.Read(Cache, LumpSize);
+ 			break;
+diff --git a/src/resourcefiles/resourcefile.cpp b/src/resourcefiles/resourcefile.cpp
+index febd921d4..4418c9dce 100644
+--- a/src/resourcefiles/resourcefile.cpp
++++ b/src/resourcefiles/resourcefile.cpp
+@@ -74,6 +74,9 @@ public:
+ 
+ FResourceLump::~FResourceLump()
+ {
++#ifdef __3DS__
++	Z3DS_ForgetResource(this);
++#endif
+ 	if (FullName != NULL)
+ 	{
+ 		delete [] FullName;
+@@ -211,11 +214,17 @@ void *FResourceLump::CacheLump()
+ {
+ 	if (Cache != NULL)
+ 	{
+-		if (RefCount > 0) RefCount++;
++#ifdef __3DS__
++		Z3DS_ForgetResource(this);
++#endif
++		if (RefCount >= 0) RefCount++;
+ 	}
+ 	else if (LumpSize > 0)
+ 	{
+-		FillCache();
++#ifdef __3DS__
++		if (!Z3DS_ReadResourceCache(this))
++#endif
++			FillCache();
+ 	}
+ 	return Cache;
+ }
+@@ -232,6 +241,9 @@ int FResourceLump::ReleaseCache()
+ 	{
+ 		if (--RefCount == 0)
+ 		{
++#ifdef __3DS__
++			if (Z3DS_RetainResource(this)) return 0;
++#endif
+ 			delete [] Cache;
+ 			Cache = NULL;
+ 		}
+@@ -297,11 +309,17 @@ FResourceFile::FResourceFile(const char *filename, FileReader *r)
+ 	if (filename != NULL) Filename = copystring(filename);
+ 	else Filename = NULL;
+ 	Reader = r;
++#ifdef __3DS__
++	ResourceCacheReader = NULL;
++#endif
+ }
+ 
+ 
+ FResourceFile::~FResourceFile()
+ {
++#ifdef __3DS__
++	delete ResourceCacheReader;
++#endif
+ 	if (Filename != NULL) delete [] Filename;
+ 	delete Reader;
+ }
+diff --git a/src/resourcefiles/resourcefile.h b/src/resourcefiles/resourcefile.h
+index 973c7f7c1..ca3eb2416 100644
+--- a/src/resourcefiles/resourcefile.h
++++ b/src/resourcefiles/resourcefile.h
+@@ -25,6 +25,11 @@ struct FResourceLump
+ 	char *			Cache;
+ 	FResourceFile *	Owner;
+ 	int				Namespace;
++#ifdef __3DS__
++	DWORD ResourceCacheKey;
++	long ResourceCacheOffset;
++	DWORD ResourceCacheCRC;
++#endif
+ 
+ 	FResourceLump()
+ 	{
+@@ -35,11 +40,19 @@ struct FResourceLump
+ 		RefCount = 0;
+ 		Namespace = 0;	// ns_global
+ 		*Name = 0;
++#ifdef __3DS__
++		ResourceCacheKey = ~0u;
++		ResourceCacheOffset = -1;
++		ResourceCacheCRC = 0;
++#endif
+ 	}
+ 
+ 	virtual ~FResourceLump();
+ 	virtual FileReader *GetReader();
+ 	virtual FileReader *NewReader();
++#ifdef __3DS__
++	virtual FileReader *OpenTextureHeader() { return NULL; }
++#endif
+ 	virtual int GetFileOffset() { return -1; }
+ 	virtual int GetIndexNum() const { return 0; }
+ 	void LumpNameSetup(const char *iname);
+@@ -60,6 +73,9 @@ public:
+ 	const char *Filename;
+ 	bool IsOptional; // [TP]
+ 	bool ContainsAuthenticatedLumps; // [SB]
++#ifdef __3DS__
++	FileReader *ResourceCacheReader;
++#endif
+ protected:
+ 	DWORD NumLumps;
+ 
+@@ -82,6 +98,13 @@ public:
+ 	virtual FResourceLump *GetLump(int no) = 0;
+ };
+ 
++#ifdef __3DS__
++void Z3DS_LoadResourceCache(FResourceFile *, const BYTE *, unsigned, unsigned);
++bool Z3DS_ReadResourceCache(FResourceLump *);
++bool Z3DS_RetainResource(FResourceLump *);
++void Z3DS_ForgetResource(FResourceLump *);
++#endif
++
+ struct FUncompressedLump : public FResourceLump
+ {
+ 	int				Position;
+@@ -123,4 +146,4 @@ struct FExternalLump : public FResourceLump
+ 
+ 
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/s_sound.cpp b/src/s_sound.cpp
+index 921b56950..9cf87428e 100644
+--- a/src/s_sound.cpp
++++ b/src/s_sound.cpp
+@@ -521,6 +521,10 @@ void S_Start ()
+ 
+ void S_PrecacheLevel ()
+ {
++#ifdef __3DS__
++    // Load effects when played; loading every BYOC class exceeds linear RAM.
++    return;
++#endif
+ 	unsigned int i;
+ 
+ 	if (GSnd)
+diff --git a/src/sdl/i_system.h b/src/sdl/i_system.h
+index f0d399930..795159adc 100644
+--- a/src/sdl/i_system.h
++++ b/src/sdl/i_system.h
+@@ -152,6 +152,7 @@ int I_FindAttr (findstate_t *fileinfo);
+ #define FA_DIREC	8
+ #define FA_ARCH		16
+ 
++#ifndef __3DS__ // devkitARM newlib already declares and implements strlwr.
+ static inline char *strlwr(char *str)
+ {
+ 	char *ptr = str;
+@@ -162,5 +163,6 @@ static inline char *strlwr(char *str)
+ 	}
+ 	return str;
+ }
++#endif
+ 
+ #endif
+diff --git a/src/sound/i_sound.cpp b/src/sound/i_sound.cpp
+index 0bc4fc20c..05ef20eab 100644
+--- a/src/sound/i_sound.cpp
++++ b/src/sound/i_sound.cpp
+@@ -248,7 +248,21 @@ public:
+ 
+ void I_InitSound ()
+ {
+-#ifdef NO_SOUND
++#if defined(__3DS__)
++    extern SoundRenderer *I3DS_CreateSoundRenderer();
++    nosound = !!Args->CheckParm("-nosound") || !!Args->CheckParm("-host");
++    nosfx = !!Args->CheckParm("-nosfx") || nosound;
++    EXTERN_CVAR(Int, snd_mididevice)
++    if(snd_mididevice==-1) snd_mididevice=-3;
++    GSnd = nosound ? static_cast<SoundRenderer *>(new NullSoundRenderer) : I3DS_CreateSoundRenderer();
++    if (!GSnd || !GSnd->IsValid()) {
++        delete GSnd;
++        GSnd = new NullSoundRenderer;
++        Printf("3DS audio initialization failed. See ndsp.txt.\n");
++    }
++    I_InitMusic();
++    snd_sfxvolume.Callback();
++#elif defined(NO_SOUND)
+ 	GSnd = new NullSoundRenderer;
+ 	I_InitMusic ();
+ #else
+diff --git a/src/sound/music_midi_base.cpp b/src/sound/music_midi_base.cpp
+index 40f231b4f..f0bb6c00a 100644
+--- a/src/sound/music_midi_base.cpp
++++ b/src/sound/music_midi_base.cpp
+@@ -195,7 +195,11 @@ CCMD (snd_listmididevices)
+ 
+ // Everything but Windows uses this code.
+ 
++#ifdef __3DS__
++CUSTOM_CVAR(Int, snd_mididevice, -3, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
++#else
+ CUSTOM_CVAR(Int, snd_mididevice, -1, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
++#endif
+ {
+ 	if (self < -5)
+ 		self = -5;
+diff --git a/src/stringtable.cpp b/src/stringtable.cpp
+index cdcb3071a..0a896cc92 100644
+--- a/src/stringtable.cpp
++++ b/src/stringtable.cpp
+@@ -127,6 +127,14 @@ void FStringTable::LoadStrings (bool enuOnly)
+ 			LoadLanguage (lump, MAKE_ID('*',0,0,0), true, ++j);
+ 			for (i = 0; i < 4; ++i)
+ 			{
++#ifdef __3DS__
++				// The 3DS locale adapter supplies the same fallback four times.
++				// Later identical passes cannot replace higher-priority strings.
++				bool duplicate = false;
++				for (int previous = 0; previous < i; ++previous)
++					if (LanguageIDs[previous] == LanguageIDs[i]) duplicate = true;
++				if (duplicate) { j += 3; continue; }
++#endif
+ 				LoadLanguage (lump, LanguageIDs[i], true, ++j);
+ 				LoadLanguage (lump, LanguageIDs[i] & MAKE_ID(0xff,0xff,0,0), true, ++j);
+ 				LoadLanguage (lump, LanguageIDs[i], false, ++j);
+diff --git a/src/sv_master.cpp b/src/sv_master.cpp
+index 7c0d6e2f9..7b5277fd1 100644
+--- a/src/sv_master.cpp
++++ b/src/sv_master.cpp
+@@ -48,7 +48,7 @@
+ //
+ //-----------------------------------------------------------------------------
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__3DS__)
+ #include <sys/utsname.h>
+ #endif
+ #include <map>
+@@ -565,11 +565,15 @@ void SERVER_MASTER_Construct( void )
+ 	g_lStoredQueryIPTail = 0;
+ 
+ #ifndef _WIN32
++#ifdef __3DS__
++    g_VersionWithOS.Format("%s on Nintendo 3DS", GetVersionStringRev());
++#else
+ 	struct utsname u_name;
+ 	if ( uname(&u_name) < 0 )
+ 		g_VersionWithOS.Format ( "%s", GetVersionStringRev() ); //error, no data
+ 	else
+ 		g_VersionWithOS.Format ( "%s on %s %s", GetVersionStringRev(), u_name.sysname, u_name.release ); // "Linux 2.6.32.5-amd64" or "FreeBSD 9.0-RELEASE" etc
++#endif
+ #endif
+ 
+ 	// [TP] Which wads will we broadcast as optional to launchers?
+diff --git a/src/textures/automaptexture.cpp b/src/textures/automaptexture.cpp
+index 67d68b9fe..d343b163e 100644
+--- a/src/textures/automaptexture.cpp
++++ b/src/textures/automaptexture.cpp
+@@ -155,6 +155,7 @@ void FAutomapTexture::MakeTexture ()
+ 
+ const BYTE *FAutomapTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -170,6 +171,7 @@ const BYTE *FAutomapTexture::GetPixels ()
+ 
+ const BYTE *FAutomapTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+diff --git a/src/textures/buildtexture.cpp b/src/textures/buildtexture.cpp
+index 46b5dc151..6d622cd84 100644
+--- a/src/textures/buildtexture.cpp
++++ b/src/textures/buildtexture.cpp
+@@ -116,6 +116,7 @@ void FBuildTexture::Unload ()
+ 
+ const BYTE *FBuildTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	return Pixels;
+ }
+ 
+@@ -127,6 +128,7 @@ const BYTE *FBuildTexture::GetPixels ()
+ 
+ const BYTE *FBuildTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (column >= Width)
+ 	{
+ 		if (WidthMask + 1 == Width)
+diff --git a/src/textures/canvastexture.cpp b/src/textures/canvastexture.cpp
+index bac4e274f..e0f9220c5 100644
+--- a/src/textures/canvastexture.cpp
++++ b/src/textures/canvastexture.cpp
+@@ -69,6 +69,7 @@ FCanvasTexture::~FCanvasTexture ()
+ 
+ const BYTE *FCanvasTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	bNeedsUpdate = true;
+ 	if (Canvas == NULL)
+ 	{
+@@ -94,6 +95,7 @@ const BYTE *FCanvasTexture::GetColumn (unsigned int column, const Span **spans_o
+ 
+ const BYTE *FCanvasTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	bNeedsUpdate = true;
+ 	if (Canvas == NULL)
+ 	{
+diff --git a/src/textures/ddstexture.cpp b/src/textures/ddstexture.cpp
+index ed5e14826..a35ea44be 100644
+--- a/src/textures/ddstexture.cpp
++++ b/src/textures/ddstexture.cpp
+@@ -435,6 +435,7 @@ FTextureFormat FDDSTexture::GetFormat()
+ 
+ const BYTE *FDDSTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -469,6 +470,7 @@ const BYTE *FDDSTexture::GetColumn (unsigned int column, const Span **spans_out)
+ 
+ const BYTE *FDDSTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+diff --git a/src/textures/emptytexture.cpp b/src/textures/emptytexture.cpp
+index 55093a3cf..860d730f1 100644
+--- a/src/textures/emptytexture.cpp
++++ b/src/textures/emptytexture.cpp
+@@ -105,6 +105,7 @@ FEmptyTexture::FEmptyTexture (int lumpnum)
+ 
+ const BYTE *FEmptyTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (spans_out != NULL)
+ 	{
+ 		*spans_out = DummySpans;
+@@ -120,6 +121,7 @@ const BYTE *FEmptyTexture::GetColumn (unsigned int column, const Span **spans_ou
+ 
+ const BYTE *FEmptyTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	return Pixels;
+ }
+ 
+diff --git a/src/textures/flattexture.cpp b/src/textures/flattexture.cpp
+index 840d53aaf..413803c61 100644
+--- a/src/textures/flattexture.cpp
++++ b/src/textures/flattexture.cpp
+@@ -148,6 +148,7 @@ void FFlatTexture::Unload ()
+ 
+ const BYTE *FFlatTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -178,6 +179,7 @@ const BYTE *FFlatTexture::GetColumn (unsigned int column, const Span **spans_out
+ 
+ const BYTE *FFlatTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+diff --git a/src/textures/imgztexture.cpp b/src/textures/imgztexture.cpp
+index 3ac109914..00ceb5818 100644
+--- a/src/textures/imgztexture.cpp
++++ b/src/textures/imgztexture.cpp
+@@ -153,6 +153,7 @@ void FIMGZTexture::Unload ()
+ 
+ const BYTE *FIMGZTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -187,6 +188,7 @@ const BYTE *FIMGZTexture::GetColumn (unsigned int column, const Span **spans_out
+ 
+ const BYTE *FIMGZTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+diff --git a/src/textures/jpegtexture.cpp b/src/textures/jpegtexture.cpp
+index fd1421df1..e0037e4f2 100644
+--- a/src/textures/jpegtexture.cpp
++++ b/src/textures/jpegtexture.cpp
+@@ -321,6 +321,7 @@ FTextureFormat FJPEGTexture::GetFormat()
+ 
+ const BYTE *FJPEGTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -351,6 +352,7 @@ const BYTE *FJPEGTexture::GetColumn (unsigned int column, const Span **spans_out
+ 
+ const BYTE *FJPEGTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+diff --git a/src/textures/multipatchtexture.cpp b/src/textures/multipatchtexture.cpp
+index 807053b07..faceac5be 100644
+--- a/src/textures/multipatchtexture.cpp
++++ b/src/textures/multipatchtexture.cpp
+@@ -372,6 +372,7 @@ void FMultiPatchTexture::Unload ()
+ 
+ const BYTE *FMultiPatchTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (bRedirect)
+ 	{
+ 		return Parts->Texture->GetPixels ();
+@@ -391,6 +392,7 @@ const BYTE *FMultiPatchTexture::GetPixels ()
+ 
+ const BYTE *FMultiPatchTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (bRedirect)
+ 	{
+ 		return Parts->Texture->GetColumn (column, spans_out);
+diff --git a/src/textures/patchtexture.cpp b/src/textures/patchtexture.cpp
+index 423ce4deb..83dbc061b 100644
+--- a/src/textures/patchtexture.cpp
++++ b/src/textures/patchtexture.cpp
+@@ -179,6 +179,9 @@ FPatchTexture::~FPatchTexture ()
+ 
+ void FPatchTexture::Unload ()
+ {
++#ifdef __3DS__
++	if (Spans != NULL) { FreeSpans(Spans); Spans = NULL; }
++#endif
+ 	if (Pixels != NULL)
+ 	{
+ 		delete[] Pixels;
+@@ -194,6 +197,7 @@ void FPatchTexture::Unload ()
+ 
+ const BYTE *FPatchTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -209,6 +213,7 @@ const BYTE *FPatchTexture::GetPixels ()
+ 
+ const BYTE *FPatchTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+diff --git a/src/textures/pcxtexture.cpp b/src/textures/pcxtexture.cpp
+index 5f694e8be..b8f9e9150 100644
+--- a/src/textures/pcxtexture.cpp
++++ b/src/textures/pcxtexture.cpp
+@@ -212,6 +212,7 @@ FTextureFormat FPCXTexture::GetFormat()
+ 
+ const BYTE *FPCXTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -242,6 +243,7 @@ const BYTE *FPCXTexture::GetColumn (unsigned int column, const Span **spans_out)
+ 
+ const BYTE *FPCXTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+diff --git a/src/textures/pngtexture.cpp b/src/textures/pngtexture.cpp
+index 1412d5c18..cd01ce834 100644
+--- a/src/textures/pngtexture.cpp
++++ b/src/textures/pngtexture.cpp
+@@ -41,6 +41,10 @@
+ #include "bitmap.h"
+ #include "v_palette.h"
+ #include "textures/textures.h"
++#ifdef __3DS__
++static unsigned nativePNGBytes;
++unsigned Z3DS_PNGResidentBytes() { return nativePNGBytes; }
++#endif
+ 
+ //==========================================================================
+ //
+@@ -360,8 +364,14 @@ FPNGTexture::~FPNGTexture ()
+ 
+ void FPNGTexture::Unload ()
+ {
++#ifdef __3DS__
++	if (Spans != NULL) { FreeSpans(Spans); Spans = NULL; }
++#endif
+ 	if (Pixels != NULL)
+ 	{
++#ifdef __3DS__
++		nativePNGBytes -= Width*Height;
++#endif
+ 		delete[] Pixels;
+ 		Pixels = NULL;
+ 	}
+@@ -396,6 +406,7 @@ FTextureFormat FPNGTexture::GetFormat()
+ 
+ const BYTE *FPNGTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -430,6 +441,7 @@ const BYTE *FPNGTexture::GetColumn (unsigned int column, const Span **spans_out)
+ 
+ const BYTE *FPNGTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -457,6 +469,9 @@ void FPNGTexture::MakeTexture ()
+ 	}
+ 
+ 	Pixels = new BYTE[Width*Height];
++#ifdef __3DS__
++	nativePNGBytes += Width*Height;
++#endif
+ 	if (StartOfIDAT == 0)
+ 	{
+ 		memset (Pixels, 0x99, Width*Height);
+diff --git a/src/textures/rawpagetexture.cpp b/src/textures/rawpagetexture.cpp
+index 1402f8844..9c29d645a 100644
+--- a/src/textures/rawpagetexture.cpp
++++ b/src/textures/rawpagetexture.cpp
+@@ -216,6 +216,7 @@ void FRawPageTexture::Unload ()
+ 
+ const BYTE *FRawPageTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -239,6 +240,7 @@ const BYTE *FRawPageTexture::GetColumn (unsigned int column, const Span **spans_
+ 
+ const BYTE *FRawPageTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+diff --git a/src/textures/texture.cpp b/src/textures/texture.cpp
+index 07e767d74..677b6648a 100644
+--- a/src/textures/texture.cpp
++++ b/src/textures/texture.cpp
+@@ -45,6 +45,7 @@
+ #include "v_video.h"
+ #include "m_fixed.h"
+ #include "textures/textures.h"
++#include <memory>
+ 
+ typedef bool (*CheckFunc)(FileReader & file);
+ typedef FTexture * (*CreateFunc)(FileReader & file, int lumpnum);
+@@ -98,13 +99,18 @@ FTexture * FTexture::CreateTexture (int lumpnum, int usetype)
+ 
+ 	if (lumpnum == -1) return NULL;
+ 
+-	FWadLump data = Wads.OpenLumpNum (lumpnum);
++#ifdef __3DS__
++	std::unique_ptr<FileReader> data(Wads.OpenTextureHeader(lumpnum));
++	if (!data) data.reset(new FWadLump(Wads.OpenLumpNum(lumpnum)));
++#else
++	std::unique_ptr<FileReader> data(new FWadLump(Wads.OpenLumpNum(lumpnum)));
++#endif
+ 
+ 	for(size_t i = 0; i < countof(CreateInfo); i++)
+ 	{
+ 		if ((CreateInfo[i].usetype == usetype || CreateInfo[i].usetype == TEX_Any))
+ 		{
+-			FTexture * tex = CreateInfo[i].TryCreate(data, lumpnum);
++			FTexture * tex = CreateInfo[i].TryCreate(*data, lumpnum);
+ 			if (tex != NULL) 
+ 			{
+ 				tex->UseType = usetype;
+@@ -590,12 +596,14 @@ void FDummyTexture::SetSize (int width, int height)
+ // This must never be called
+ const BYTE *FDummyTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	return NULL;
+ }
+ 
+ // And this also must never be called
+ const BYTE *FDummyTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	return NULL;
+ }
+ 
+diff --git a/src/textures/texturemanager.cpp b/src/textures/texturemanager.cpp
+index e749153c8..3594c8c7f 100644
+--- a/src/textures/texturemanager.cpp
++++ b/src/textures/texturemanager.cpp
+@@ -352,6 +352,18 @@ void FTextureManager::UnloadAll ()
+ 		Textures[i].Texture->Unload ();
+ 	}
+ }
++#ifdef __3DS__
++void FTextureManager::PurgeNativePixels(unsigned clock,unsigned age)
++{
++    for(unsigned i=0;i<Textures.Size();++i) {
++        FTexture *texture=Textures[i].Texture;
++        if(texture && !texture->bHasCanvas && texture->NativeLastUse && clock-texture->NativeLastUse>age) {
++            texture->Unload();
++            texture->NativeLastUse=0; // Do not repeatedly unload inactive metadata.
++        }
++    }
++}
++#endif
+ 
+ //==========================================================================
+ //
+@@ -976,7 +988,13 @@ void FTextureManager::Init()
+ 	int wadcnt = Wads.GetNumWads();
+ 	for(int i = 0; i< wadcnt; i++)
+ 	{
++#ifdef __3DS__
++		unsigned started = I_MSTime();
++#endif
+ 		AddTexturesForWad(i);
++#ifdef __3DS__
++		Printf("3DS Texman: %s registered in %u ms\n", Wads.GetWadName(i), I_MSTime() - started);
++#endif
+ 	}
+ 
+ 	// Add one marker so that the last WAD is easier to handle and treat
+@@ -1019,6 +1037,11 @@ void FTextureManager::Init()
+ 	FixAnimations();
+ 	InitSwitchList();
+ 	InitPalettedVersions();
++#ifdef __3DS__
++	extern void Z3DS_ReleaseTextureHeaders();
++	Z3DS_ReleaseTextureHeaders();
++	Printf("3DS: PNG registration buffers released for gameplay.\n");
++#endif
+ }
+ 
+ //==========================================================================
+diff --git a/src/textures/textures.h b/src/textures/textures.h
+index b5d02f648..933994cd1 100644
+--- a/src/textures/textures.h
++++ b/src/textures/textures.h
+@@ -201,6 +201,9 @@ public:
+ 	BYTE bKeepAround:1;		// This texture was used as part of a multi-patch texture. Do not free it.
+ 
+ 	WORD Rotations;
++#ifdef __3DS__
++    unsigned NativeLastUse = 0;
++#endif
+ 	SWORD SkyOffset;
+ 
+ 	enum // UseTypes
+@@ -377,12 +380,20 @@ public:
+ };
+ 
+ // Texture manager
++#ifdef __3DS__
++FTexture *Z3DS_TouchTexture(FTexture *);
++#define Z3DS_TOUCH_TEXTURE(t) Z3DS_TouchTexture(t)
++#else
++#define Z3DS_TOUCH_TEXTURE(t) (t)
++#endif
+ class FTextureManager
+ {
+ public:
+ 	FTextureManager ();
+ 	~FTextureManager ();
+ 
++	// Metadata lookup does not use pixel data. Native lifetime tracking belongs
++	// in GetPixels/GetColumn, so off-screen animated sprites can be evicted.
+ 	// Get texture without translation
+ 	FTexture *operator[] (FTextureID texnum)
+ 	{
+@@ -470,6 +481,9 @@ public:
+ 	void ReplaceTexture (FTextureID picnum, FTexture *newtexture, bool free);
+ 
+ 	void UnloadAll ();
++#ifdef __3DS__
++    void PurgeNativePixels(unsigned clock,unsigned age);
++#endif
+ 
+ 	int NumTextures () const { return (int)Textures.Size(); }
+ 	void PrecacheLevel (void);
+@@ -628,5 +642,3 @@ public:
+ extern FTextureManager TexMan;
+ 
+ #endif
+-
+-
+diff --git a/src/textures/tgatexture.cpp b/src/textures/tgatexture.cpp
+index 47564fade..7093d9e23 100644
+--- a/src/textures/tgatexture.cpp
++++ b/src/textures/tgatexture.cpp
+@@ -203,6 +203,7 @@ FTextureFormat FTGATexture::GetFormat()
+ 
+ const BYTE *FTGATexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+@@ -237,6 +238,7 @@ const BYTE *FTGATexture::GetColumn (unsigned int column, const Span **spans_out)
+ 
+ const BYTE *FTGATexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	if (Pixels == NULL)
+ 	{
+ 		MakeTexture ();
+diff --git a/src/textures/warptexture.cpp b/src/textures/warptexture.cpp
+index 9e81f7bc4..5a9b4081e 100644
+--- a/src/textures/warptexture.cpp
++++ b/src/textures/warptexture.cpp
+@@ -80,6 +80,7 @@ bool FWarpTexture::CheckModified ()
+ 
+ const BYTE *FWarpTexture::GetPixels ()
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	DWORD time = r_FrameTime;
+ 
+ 	if (Pixels == NULL || time != GenTime)
+@@ -91,6 +92,7 @@ const BYTE *FWarpTexture::GetPixels ()
+ 
+ const BYTE *FWarpTexture::GetColumn (unsigned int column, const Span **spans_out)
+ {
++	Z3DS_TOUCH_TEXTURE(this);
+ 	DWORD time = r_FrameTime;
+ 
+ 	if (Pixels == NULL || time != GenTime)
+diff --git a/src/v_font.cpp b/src/v_font.cpp
+index c1688b95b..841b9eb4d 100644
+--- a/src/v_font.cpp
++++ b/src/v_font.cpp
+@@ -86,6 +86,9 @@ The FON2 header is followed by variable length data:
+ #include "v_video.h"
+ #include "w_wad.h"
+ #include "i_system.h"
++#ifdef __3DS__
++#include "m_argv.h"
++#endif
+ #include "gi.h"
+ #include "cmdlib.h"
+ #include "sc_man.h"
+@@ -781,6 +784,11 @@ FRemapTable *FFont::GetColorTranslation (EColorRange range) const
+ 		return NULL;
+ 	else if (range >= NumTextColors)
+ 		range = CR_UNTRANSLATED;
++    if (range < 0 || (unsigned)range >= Ranges.Size())
++    {
++        range=CR_UNTRANSLATED;
++        if ((unsigned)range >= Ranges.Size()) return NULL;
++    }
+ 	return &Ranges[range];
+ }
+ 
+@@ -2588,6 +2596,24 @@ EColorRange V_FindFontColor (FName name)
+ 	return CR_UNTRANSLATED;
+ }
+ 
++#ifdef __3DS__
++void Z3DS_TestFontColorRanges()
++{
++    for(unsigned n=0;n<TranslationLookup.Size();++n) {
++        const TranslationMap &entry=TranslationLookup[n];
++        if((int)V_FindFontColor(entry.Name)!=entry.Number)
++            I_FatalError("Named font color index truncated: %d",entry.Number);
++    }
++    if(SmallFont && NumTextColors>148) {
++        FRemapTable *high=SmallFont->GetColorTranslation((EColorRange)148);
++        if(!high || !high->Remap || high==SmallFont->GetColorTranslation(CR_UNTRANSLATED))
++            I_FatalError("Font range 148 did not retain its own translation");
++    }
++    FILE *report=fopen("sdmc:/3ds/zandronum/font-colors-test.txt","w");
++    if(report) { fprintf(report,"PASS: enum=%u bytes; colors=%d; named lookups=%u; range148=%d range386=%d\n",(unsigned)sizeof(EColorRange),NumTextColors,TranslationLookup.Size(),(int)(EColorRange)148,(int)(EColorRange)386); fclose(report); }
++}
++#endif
++
+ //==========================================================================
+ //
+ // V_LogColorFromColorRange
+@@ -2754,6 +2780,9 @@ void V_InitFonts()
+ 			IntermissionFont = BigFont;
+ 		}
+ 	}
++#ifdef __3DS__
++    if(Args && (Args->CheckParm("-3ds-test-network") || Args->CheckParm("-3ds-test-font"))) Z3DS_TestFontColorRanges();
++#endif
+ }
+ 
+ void V_ClearFonts()
+diff --git a/src/v_font.h b/src/v_font.h
+index 057fa4b0a..d236d0ca7 100644
+--- a/src/v_font.h
++++ b/src/v_font.h
+@@ -41,7 +41,9 @@ struct FRemapTable;
+ class FTexture;
+ class FArchive;
+ 
+-enum EColorRange
++// Named TEXTCOLO ranges extend beyond the built-in values. ARM's default
++// short enums otherwise truncate mod color indices (148 becomes -108).
++enum EColorRange : int
+ {
+ 	CR_UNDEFINED = -1,
+ 	CR_BRICK,
+@@ -69,6 +71,8 @@ enum EColorRange
+ 	CR_CYAN,
+ 	NUM_TEXT_COLORS
+ };
++static_assert(sizeof(EColorRange) == sizeof(int), "Named font colors require full integer indices");
++static_assert((int)(EColorRange)148 == 148, "Mod font color indices must not truncate");
+ 
+ extern int NumTextColors;
+ 
+diff --git a/src/v_palette.cpp b/src/v_palette.cpp
+index edb5ae4c0..56dbf36a5 100644
+--- a/src/v_palette.cpp
++++ b/src/v_palette.cpp
+@@ -59,6 +59,68 @@
+ #include "r_data/colormaps.h"
+ // [BB] New #includes.
+ #include "deathmatch.h"
++#ifdef __3DS__
++#include "zlib.h"
++#include "r_utility.h"
++CVAR(Bool, native_mod_colors_3ds, true, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
++static int modPaletteSlots[6], modPaletteCount;
++void Z3DS_ExtendDefaultColormap(BYTE *maps)
++{
++    for(int n=0;n<modPaletteCount;++n) {
++        int slot=modPaletteSlots[n]; PalEntry color=GPalette.BaseColors[slot];
++        for(int light=0;light<NUMCOLORMAPS;++light) {
++            int scale=NUMCOLORMAPS-light;
++            maps[light*256+slot]=ColorMatcher.Pick(color.r*scale/NUMCOLORMAPS,color.g*scale/NUMCOLORMAPS,color.b*scale/NUMCOLORMAPS);
++        }
++    }
++}
++
++// BYOC's 1x1 pink material loses its hue in Doom's 256-color palette.
++// Reuse only duplicate palette slots, remapping their original indexed pixels
++// to identical canonical colors. Custom palettes with no free slots are left alone.
++static void ExtendBYOCPalette()
++{
++    modPaletteCount=0;
++    if (!native_mod_colors_3ds) return;
++    int lump=Wads.CheckNumForFullName("Textures/TestMap/NOISETPK.png");
++    if(lump<0 || Wads.LumpLength(lump)>512) return;
++    BYTE data[512], raw[5]; unsigned size=Wads.LumpLength(lump);
++    FWadLump file=Wads.OpenLumpNum(lump);
++    if(file.Read(data,size)!=(long)size || size<33 || memcmp(data,"\x89PNG\r\n\x1a\n",8)) return;
++    const BYTE ihdr[]={0,0,0,1,0,0,0,1,8,6,0,0,0};
++    if(memcmp(data+16,ihdr,sizeof(ihdr))) return;
++    bool decoded=false;
++    for(unsigned pos=8;pos+12<=size;) {
++        DWORD len; memcpy(&len,data+pos,4); len=BigLong(len);
++        if(len>size-pos-12) return;
++        if(!memcmp(data+pos+4,"IDAT",4)) {
++            uLongf output=sizeof(raw);
++            decoded=uncompress(raw,&output,data+pos+8,len)==Z_OK && output==5 && raw[0]==0 && raw[4]==255;
++            break;
++        }
++        pos+=12+len;
++    }
++    if(!decoded) return;
++    PalEntry original[256]; memcpy(original,GPalette.BaseColors,sizeof(original));
++    BYTE originalRemap[256]; memcpy(originalRemap,GPalette.Remap,sizeof(originalRemap));
++    int slots[6], count=0;
++    for(int i=1;i<256 && count<6;++i) {
++        if(i==GPalette.Remap[0] || GPalette.Remap[i]!=i) continue;
++        for(int j=1;j<i;++j) if(original[i]==original[j]) {
++            GPalette.Remap[i]=GPalette.Remap[j]; slots[count++]=i; break;
++        }
++    }
++    const int brightness[]={100,80,60,40,25,10};
++    for(int n=0;n<count;++n) GPalette.BaseColors[slots[n]]=PalEntry(raw[1]*brightness[n]/100,raw[2]*brightness[n]/100,raw[3]*brightness[n]/100);
++    for(int i=0;i<256;++i) if(GPalette.BaseColors[GPalette.Remap[i]]!=original[originalRemap[i]]) {
++        memcpy(GPalette.BaseColors,original,sizeof(original));
++        memcpy(GPalette.Remap,originalRemap,sizeof(originalRemap));
++        Printf("3DS BYOC palette: correction skipped to preserve indexed colors\n"); return;
++    }
++    modPaletteCount=count; memcpy(modPaletteSlots,slots,count*sizeof(int));
++    if(count) Printf("3DS BYOC palette: %d duplicate slots restored pink RGB %u,%u,%u; original indexed colors preserved\n",count,raw[1],raw[2],raw[3]);
++}
++#endif
+ 
+ FPalette GPalette;
+ FColorMatcher ColorMatcher;
+@@ -369,6 +431,9 @@ void InitPalette ()
+ 
+ 	GPalette.SetPalette (pal);
+ 	GPalette.MakeGoodRemap ();
++#ifdef __3DS__
++    ExtendBYOCPalette();
++#endif
+ 	ColorMatcher.SetPalette ((DWORD *)GPalette.BaseColors);
+ 
+ 	// The BUILD engine already has a transparent color, so it doesn't need any remapping.
+diff --git a/src/w_wad.cpp b/src/w_wad.cpp
+index 711651512..582222aef 100644
+--- a/src/w_wad.cpp
++++ b/src/w_wad.cpp
+@@ -1174,6 +1174,13 @@ FWadLump FWadCollection::OpenLumpNum (int lump)
+ 
+ 	return FWadLump(LumpInfo[lump].lump);
+ }
++#ifdef __3DS__
++FileReader *FWadCollection::OpenTextureHeader(int lump)
++{
++	if ((unsigned)lump >= LumpInfo.Size()) return NULL;
++	return LumpInfo[lump].lump->OpenTextureHeader();
++}
++#endif
+ 
+ //==========================================================================
+ //
+diff --git a/src/w_wad.h b/src/w_wad.h
+index d98e929aa..4efcf2b3f 100644
+--- a/src/w_wad.h
++++ b/src/w_wad.h
+@@ -190,6 +190,9 @@ public:
+ 	static DWORD LumpNameHash (const char *name);		// [RH] Create hash key from an 8-char name
+ 
+ 	int LumpLength (int lump) const;
++#ifdef __3DS__
++	FileReader *OpenTextureHeader(int lump);
++#endif
+ 	int GetLumpOffset (int lump);					// [RH] Returns offset of lump in the wadfile
+ 	int GetLumpFlags (int lump);					// Return the flags for this lump
+ 	void GetLumpName (char *to, int lump) const;	// [RH] Copies the lump name to to using uppercopy
+diff --git a/src/zstring.h b/src/zstring.h
+index fabcdbfda..fb68fe618 100644
+--- a/src/zstring.h
++++ b/src/zstring.h
+@@ -107,6 +107,9 @@ struct FNullStringData
+ 
+ enum ELumpNum
+ {
++    // GCC 16 can optimize casts to an empty enum as zero. Give this index
++    // wrapper an explicit range so FString reads the requested resource lump.
++    ELumpNum_Force32 = 0x7fffffff
+ };
+ 
+ class FString
+diff --git a/upnpnat/upnpnat.cpp b/upnpnat/upnpnat.cpp
+index 6d5ddfd87..a3319f928 100644
+--- a/upnpnat/upnpnat.cpp
++++ b/upnpnat/upnpnat.cpp
+@@ -169,7 +169,14 @@ bool UPNPNAT::tcp_connect(const char * _host,unsigned short int _port)
+ 	struct timeval tv;
+ 	tv.tv_sec = 3;
+ 	tv.tv_usec = 0;
+-	ret=setsockopt(tcp_socket_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof ( tv ) ); 
++#ifdef __3DS__
++    // libctru has no SO_RCVTIMEO. Do not allow blocking UPnP requests.
++    closesocket(tcp_socket_fd);
++    tcp_socket_fd = -1;
++    return false;
++#else
++	ret=setsockopt(tcp_socket_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof ( tv ) );
++#endif
+ 
+ 	struct sockaddr_in r_address;
+ 
